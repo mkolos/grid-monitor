@@ -1,1 +1,3 @@
 rootProject.name = 'grid-monitor'
+
+include 'producer'
