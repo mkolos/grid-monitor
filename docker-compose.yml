@@ -15,3 +15,13 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:9093
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  postgres:
+    image: postgres:16
+    container_name: grid-monitor-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: grid_monitor
+      POSTGRES_USER: grid
+      POSTGRES_PASSWORD: grid
