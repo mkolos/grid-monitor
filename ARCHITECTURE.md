@@ -73,6 +73,21 @@ thread pool draining one queue would NOT have this guarantee.
 - Each worker thread drains its own queue and writes one row at a time,
   immediately (no batching, at least until we've measured whether it's a
   bottleneck at ~460 msg/s).
+- Workers run on **virtual threads** (`Executors.newVirtualThreadPerTaskExecutor()`).
+  A worker spends nearly all its life parked — on `queue.take()` or inside
+  the blocking JDBC write — which is exactly the shape of workload virtual
+  threads are for. This is a pure executor swap: the hash routing, the
+  queues, and the ordering guarantee are unchanged, since that guarantee
+  comes from the queue/worker topology, not from the kind of thread each
+  worker runs on.
+- One consequence: `workerCount` used to be capped by platform-thread cost.
+  With virtual threads that cap is gone, so the real ceiling on concurrent
+  DB writers is now the JDBC connection pool (HikariCP, default max size
+  10, currently unconfigured). Raising `workerCount` well past the pool
+  size wouldn't error, but writes would start queuing invisibly inside
+  Hikari instead of in the `BlockingQueue` you can actually see. Not an
+  issue at the current `workerCount=8`; worth revisiting together if that
+  number ever goes up (see Parking lot).
 
 ## Producer concurrency model
 
@@ -80,6 +95,21 @@ thread pool draining one queue would NOT have this guarantee.
 - ~2,300 independently scheduled periodic tasks, one per meter, each firing
   every 5s. The pool multiplexes far more logical tasks than OS threads —
   the core lesson here.
+- **Deliberately still platform threads**, unlike the consumer's worker
+  pool (see below). Two reasons this module doesn't get the same
+  virtual-thread treatment:
+  - The JDK has no virtual-thread `ScheduledExecutorService` —
+    `Executors.newVirtualThreadPerTaskExecutor()` only produces a plain
+    `ExecutorService`, so `scheduleAtFixedRate` has no direct
+    virtual-thread equivalent to swap in.
+  - More fundamentally, a tick's work here doesn't block: it computes the
+    next reading (CPU) and calls `KafkaTemplate.send()`, which is
+    asynchronous and returns immediately. Virtual threads are cheap
+    specifically because a *parked* virtual thread costs ~nothing extra;
+    with nothing here that parks, there's no cost to amortize. Contrast
+    with the consumer worker, which spends nearly all its time blocked on
+    `queue.take()` or a blocking JDBC write — that's the shape of workload
+    virtual threads are for.
 
 ## DB schema
 
@@ -99,4 +129,6 @@ thread pool draining one queue would NOT have this guarantee.
 - Frontend tech stack.
 - Message serialization upgrade (Avro/Schema Registry) if JSON becomes a pain.
 - DB write batching, if per-row inserts turn out to bottleneck at real load.
-- Connection pool sizing relative to worker pool size.
+- Connection pool sizing relative to worker pool size — now more relevant
+  since consumer workers run on virtual threads and `workerCount` is no
+  longer bounded by platform-thread cost.

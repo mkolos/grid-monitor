@@ -1,10 +1,5 @@
 package com.smartgrid.consumer.routing;
 
-import com.smartgrid.consumer.config.ConsumerProperties;
-import com.smartgrid.consumer.db.ReadingRepository;
-import com.smartgrid.consumer.model.Reading;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -12,13 +7,23 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+
 import org.springframework.stereotype.Component;
+
+import com.smartgrid.consumer.config.ConsumerProperties;
+import com.smartgrid.consumer.db.ReadingRepository;
+import com.smartgrid.consumer.model.Reading;
+
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 
 /**
  * Routes each reading to a fixed worker by {@code hash(meterId) % workers},
  * so every message for a given meter always lands on the same worker
  * thread — preserving the per-meter ordering Kafka already guarantees via
- * partitioning by meterId, all the way through to the DB write.
+ * partitioning by meterId, all the way through to the DB write. This
+ * ordering guarantee comes from the queue/worker topology, not from the
+ * kind of thread each worker runs on.
  *
  * <p>Each worker owns one bounded queue; {@code put()} blocks when full,
  * which is the backpressure mechanism that slows Kafka consumption to
@@ -43,7 +48,7 @@ public class ReadingRouter {
 
 	@PostConstruct
 	void start() {
-		executor = Executors.newFixedThreadPool(workerCount);
+		executor = Executors.newVirtualThreadPerTaskExecutor();
 		for (BlockingQueue<Reading> queue : queues) {
 			executor.submit(new Worker(queue, repository));
 		}
