@@ -111,6 +111,37 @@ thread pool draining one queue would NOT have this guarantee.
     `queue.take()` or a blocking JDBC write — that's the shape of workload
     virtual threads are for.
 
+## Observability (consumer)
+
+- Consumer exposes Prometheus-format metrics at `/actuator/prometheus`
+  (via `micrometer-registry-prometheus`; `management.endpoints.web.exposure.include=health,prometheus`).
+  This is metrics-first, infra-second: no Prometheus/Grafana containers
+  yet, just the endpoint, curl-verified by hand. Prometheus+Grafana as
+  scrape/dashboard infra is a separate future step.
+- Adding this required adding `spring-boot-starter-web` to `consumer`,
+  which previously had no embedded web server at all — Actuator's HTTP
+  endpoints (including `/actuator/prometheus`) can't be served without
+  one; there's no way around this if metrics need to be scraped over
+  HTTP. Consumer is now a "web app" solely to serve this endpoint; it has
+  no REST controllers.
+- Four custom metrics, all tagged by `worker` (the router's per-worker
+  hash index), built once at startup per worker
+  (`consumer/src/main/java/com/smartgrid/consumer/routing/WorkerMetrics.java`)
+  rather than touching the registry on the hot path:
+  - `consumer.queue.depth` (gauge) — live size of each worker's
+    `BlockingQueue`, the direct visibility into the backpressure mechanism.
+  - `consumer.db.write.duration` (timer) — wall-clock time of each
+    `ReadingRepository.save()` call.
+  - `consumer.readings.processed` / `consumer.readings.dropped`
+    (counters) — success/failure per worker; `dropped` turns what used to
+    be a log-only failure mode into an alertable time series.
+- Measured 2026-09-24 under real producer traffic (~460 msg/s): DB write
+  latency averaged **~1.5ms** per write, queue depth sat at **0** on all 8
+  workers throughout, and processed counts were evenly spread
+  (~1825–1894 per worker). This is real confirmation of the batching
+  parking-lot entry below — the DB write path has substantial headroom at
+  current load.
+
 ## DB schema
 
 | Table | Columns | Notes |
@@ -129,6 +160,15 @@ thread pool draining one queue would NOT have this guarantee.
 - Frontend tech stack.
 - Message serialization upgrade (Avro/Schema Registry) if JSON becomes a pain.
 - DB write batching, if per-row inserts turn out to bottleneck at real load.
+  Revisited 2026-09-24: at ~460 msg/s / 8 workers (~57 readings/sec/worker),
+  per-row writes are nowhere near a measured bottleneck on local Postgres,
+  so batching was deferred again rather than added speculatively. If it
+  comes back, the design already discussed is a hybrid — a real JPA
+  `@Entity` + Hibernate batch insert for `electricity_data` (append-only,
+  fits the ORM lifecycle), but `latest_reading`'s conditional upsert
+  (`WHERE excluded.timestamp > latest_reading.timestamp`) stays native
+  batched SQL (`JdbcTemplate.batchUpdate`), since plain JPA has no concept
+  of a conditional upsert.
 - Connection pool sizing relative to worker pool size — now more relevant
   since consumer workers run on virtual threads and `workerCount` is no
   longer bounded by platform-thread cost.

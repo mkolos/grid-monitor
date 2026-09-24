@@ -9,6 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.smartgrid.consumer.db.ReadingRepository;
 import com.smartgrid.consumer.model.Reading;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
@@ -20,6 +21,8 @@ class WorkerTest {
 	private static final Reading READING_1 = new Reading("01-001", 1, 1.5, 230.0, 1000L);
 	private static final Reading READING_2 = new Reading("01-002", 1, 2.5, 231.0, 2000L);
 
+	private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
+
 	@Test
 	void savesEachQueuedReading() throws InterruptedException {
 		BlockingQueue<Reading> queue = new ArrayBlockingQueue<>(10);
@@ -30,7 +33,7 @@ class WorkerTest {
 			return null;
 		}).when(repository).save(org.mockito.ArgumentMatchers.any());
 
-		Thread thread = new Thread(new Worker(queue, repository));
+		Thread thread = new Thread(new Worker(queue, repository, WorkerMetrics.forWorker(0, registry)));
 		thread.start();
 		try {
 			queue.put(READING_1);
@@ -39,6 +42,9 @@ class WorkerTest {
 			assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
 			verify(repository).save(READING_1);
 			verify(repository).save(READING_2);
+			assertThat(registry.get("consumer.readings.processed").tag("worker", "0").counter().count()).isEqualTo(2.0);
+			assertThat(registry.get("consumer.readings.dropped").tag("worker", "0").counter().count()).isEqualTo(0.0);
+			assertThat(registry.get("consumer.db.write.duration").tag("worker", "0").timer().count()).isEqualTo(2L);
 		} finally {
 			thread.interrupt();
 			thread.join(1000);
@@ -56,7 +62,7 @@ class WorkerTest {
 			return null;
 		}).when(repository).save(eq(READING_2));
 
-		Thread thread = new Thread(new Worker(queue, repository));
+		Thread thread = new Thread(new Worker(queue, repository, WorkerMetrics.forWorker(0, registry)));
 		thread.start();
 		try {
 			queue.put(READING_1);
@@ -65,6 +71,8 @@ class WorkerTest {
 			assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
 			verify(repository).save(READING_1);
 			verify(repository).save(READING_2);
+			assertThat(registry.get("consumer.readings.processed").tag("worker", "0").counter().count()).isEqualTo(1.0);
+			assertThat(registry.get("consumer.readings.dropped").tag("worker", "0").counter().count()).isEqualTo(1.0);
 		} finally {
 			thread.interrupt();
 			thread.join(1000);

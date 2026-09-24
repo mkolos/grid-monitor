@@ -18,10 +18,12 @@ class Worker implements Runnable {
 
 	private final BlockingQueue<Reading> queue;
 	private final ReadingRepository repository;
+	private final WorkerMetrics metrics;
 
-	Worker(BlockingQueue<Reading> queue, ReadingRepository repository) {
+	Worker(BlockingQueue<Reading> queue, ReadingRepository repository, WorkerMetrics metrics) {
 		this.queue = queue;
 		this.repository = repository;
+		this.metrics = metrics;
 	}
 
 	@Override
@@ -35,8 +37,10 @@ class Worker implements Runnable {
 				return;
 			}
 			try {
-				repository.save(reading);
+				metrics.dbWriteTimer().record(() -> repository.save(reading));
+				metrics.processedCounter().increment();
 			} catch (Exception ex) {
+				metrics.droppedCounter().increment();
 				log.error("Dropping reading for meter {}, failed to write to DB", reading.meterId(), ex);
 			}
 		}

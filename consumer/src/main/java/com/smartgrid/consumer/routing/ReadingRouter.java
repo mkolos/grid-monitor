@@ -14,6 +14,8 @@ import com.smartgrid.consumer.config.ConsumerProperties;
 import com.smartgrid.consumer.db.ReadingRepository;
 import com.smartgrid.consumer.model.Reading;
 
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 
@@ -34,14 +36,22 @@ public class ReadingRouter {
 
 	private final int workerCount;
 	private final List<BlockingQueue<Reading>> queues;
+	private final List<WorkerMetrics> workerMetrics;
 	private final ReadingRepository repository;
 	private ExecutorService executor;
 
-	public ReadingRouter(ConsumerProperties properties, ReadingRepository repository) {
+	public ReadingRouter(ConsumerProperties properties, ReadingRepository repository, MeterRegistry registry) {
 		this.workerCount = properties.workerCount();
 		this.queues = new ArrayList<>(workerCount);
+		this.workerMetrics = new ArrayList<>(workerCount);
 		for (int i = 0; i < workerCount; i++) {
-			queues.add(new ArrayBlockingQueue<>(properties.queueCapacity()));
+			BlockingQueue<Reading> queue = new ArrayBlockingQueue<>(properties.queueCapacity());
+			queues.add(queue);
+			Gauge.builder("consumer.queue.depth", queue, BlockingQueue::size)
+					.description("Number of readings currently queued for a worker (DB-write backpressure)")
+					.tag("worker", String.valueOf(i))
+					.register(registry);
+			workerMetrics.add(WorkerMetrics.forWorker(i, registry));
 		}
 		this.repository = repository;
 	}
@@ -49,8 +59,8 @@ public class ReadingRouter {
 	@PostConstruct
 	void start() {
 		executor = Executors.newVirtualThreadPerTaskExecutor();
-		for (BlockingQueue<Reading> queue : queues) {
-			executor.submit(new Worker(queue, repository));
+		for (int i = 0; i < queues.size(); i++) {
+			executor.submit(new Worker(queues.get(i), repository, workerMetrics.get(i)));
 		}
 	}
 

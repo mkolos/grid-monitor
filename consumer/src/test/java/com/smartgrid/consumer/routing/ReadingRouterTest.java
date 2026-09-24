@@ -8,6 +8,7 @@ import static org.mockito.Mockito.mock;
 import com.smartgrid.consumer.config.ConsumerProperties;
 import com.smartgrid.consumer.db.ReadingRepository;
 import com.smartgrid.consumer.model.Reading;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 class ReadingRouterTest {
 
+	private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
 	private ReadingRouter router;
 
 	@AfterEach
@@ -65,7 +67,7 @@ class ReadingRouterTest {
 			return null;
 		}).when(repository).save(any());
 
-		router = new ReadingRouter(new ConsumerProperties("topic", "group", 2, 10), repository);
+		router = new ReadingRouter(new ConsumerProperties("topic", "group", 2, 10), repository, registry);
 		router.start();
 		router.route(new Reading("01-001", 1, 1.5, 230.0, 1000L));
 
@@ -85,7 +87,7 @@ class ReadingRouterTest {
 			return null;
 		}).when(repository).save(any());
 
-		router = new ReadingRouter(new ConsumerProperties("topic", "group", 8, 50), repository);
+		router = new ReadingRouter(new ConsumerProperties("topic", "group", 8, 50), repository, registry);
 		router.start();
 		for (int i = 0; i < messageCount; i++) {
 			router.route(new Reading("01-001", 1, 1.0 + i, 230.0, 1000L + i));
@@ -93,6 +95,9 @@ class ReadingRouterTest {
 
 		assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
 		assertThat(threadIds).hasSize(1);
+		int expectedIndex = ReadingRouter.workerIndexFor("01-001", 8);
+		assertThat(registry.get("consumer.readings.processed").tag("worker", String.valueOf(expectedIndex)).counter().count())
+				.isEqualTo(20.0);
 	}
 
 	@Test
@@ -112,7 +117,7 @@ class ReadingRouterTest {
 			return null;
 		}).when(repository).save(any());
 
-		router = new ReadingRouter(new ConsumerProperties("topic", "group", 8, 50), repository);
+		router = new ReadingRouter(new ConsumerProperties("topic", "group", 8, 50), repository, registry);
 		router.start();
 		router.route(new Reading("01-001", 1, 1.5, 230.0, 1000L));
 		assertThat(blockedMeterStarted.await(2, TimeUnit.SECONDS)).isTrue();
@@ -132,7 +137,7 @@ class ReadingRouterTest {
 			return null;
 		}).when(repository).save(any());
 
-		router = new ReadingRouter(new ConsumerProperties("topic", "group", 1, 1), repository);
+		router = new ReadingRouter(new ConsumerProperties("topic", "group", 1, 1), repository, registry);
 		router.start();
 		router.route(new Reading("01-001", 1, 1.0, 230.0, 1000L));
 		router.route(new Reading("01-001", 1, 2.0, 230.0, 2000L));
@@ -145,6 +150,7 @@ class ReadingRouterTest {
 		routingThread.start();
 		try {
 			assertThat(thirdMessageAccepted.await(200, TimeUnit.MILLISECONDS)).isFalse();
+			assertThat(registry.get("consumer.queue.depth").tag("worker", "0").gauge().value()).isEqualTo(1.0);
 		} finally {
 			releaseWorker.countDown();
 			routingThread.join(2000);
@@ -154,7 +160,7 @@ class ReadingRouterTest {
 	@Test
 	void shutdownStopsWorkersPromptly() throws InterruptedException {
 		ReadingRepository repository = mock(ReadingRepository.class);
-		router = new ReadingRouter(new ConsumerProperties("topic", "group", 4, 10), repository);
+		router = new ReadingRouter(new ConsumerProperties("topic", "group", 4, 10), repository, registry);
 		router.start();
 		router.route(new Reading("01-001", 1, 1.0, 230.0, 1000L));
 
