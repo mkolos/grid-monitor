@@ -25,3 +25,26 @@ services:
       POSTGRES_DB: grid_monitor
       POSTGRES_USER: grid
       POSTGRES_PASSWORD: grid
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: grid-monitor-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grid-monitor-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - prometheus
+
+volumes:
+  grafana-data:
