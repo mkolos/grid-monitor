@@ -66,6 +66,15 @@ Start the API
 ./gradlew :api:bootRun
 ```
 
+Start the analyzer (anomaly detection + LLM narration). Requires a local
+[Ollama](https://ollama.com) install with a model pulled first:
+
+```bash
+ollama pull llama3.2
+ollama serve
+./gradlew :analyzer:bootRun
+```
+
 ## Configuration
 
 Example configuration:

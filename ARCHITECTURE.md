@@ -4,19 +4,21 @@ Learning project: a smart grid telemetry system for Vienna's electricity network
 Goals: Java, multithreading, and Kafka message consumption, built as a small
 but realistic multi-component system.
 
-## Components (4 Gradle modules, one repo)
+## Components (5 Gradle modules, one repo)
 
 ```
 grid-monitor/
 ├── producer/    Spring Boot + spring-kafka. Simulates 2,300 meters.
 ├── consumer/    Spring Boot + spring-kafka. Kafka -> worker pool -> DB.
 ├── api/         Spring Boot + webmvc. Read-only queries for the frontend.
+├── analyzer/    Spring Boot + webmvc + Spring AI. Rule-based anomaly
+│                detection, LLM-narrated (see below).
 └── frontend/    Not designed yet — out of scope until the backend works.
 ```
 
-Consumer and API are separate modules on purpose: consumer only ever writes
-to the DB, API only ever reads. They can be run, scaled, and reasoned about
-independently.
+Consumer, API, and analyzer are separate modules on purpose: consumer only
+ever writes to the DB, API and analyzer only ever read. They can be run,
+scaled, and reasoned about independently.
 
 ## Scenario / scale
 
@@ -147,13 +149,47 @@ thread pool draining one queue would NOT have this guarantee.
 | Table | Columns | Notes |
 |---|---|---|
 | `districts` | `id` (PK), `district_number`, `name` | 23 rows, seeded at startup |
-| `electricity_data` | `id` (PK), `meter_id`, `district_id` (FK), `power_consumption_kw`, `voltage`, `timestamp` | append-only history |
+| `electricity_data` | `id` (PK), `meter_id`, `district_id` (FK), `power_consumption_kw`, `voltage`, `timestamp` | append-only history; indexed on `(meter_id, timestamp)` for analyzer's recurring per-meter history-window scan |
 | `latest_reading` | `meter_id` (PK), `district_id` (FK), `power_consumption_kw`, `voltage`, `timestamp` | 2,300 rows, upserted with `WHERE excluded.timestamp > latest_reading.timestamp` guard against out-of-order writes |
 
 ## API
 
 - `GET /districts/live` — for each district, sum `power_consumption_kw`
   across `latest_reading` (one row per meter), grouped by district.
+
+## Anomaly detection & narration (analyzer)
+
+A learning exercise in Spring AI, added on top of the existing pipeline.
+Deliberately keeps "detect" and "explain" separate: detection is
+deterministic, cheap, and fully unit-tested without touching an LLM;
+narration exists only to translate already-known facts into plain English,
+never to do the detecting itself — an LLM call per reading would be far
+slower and non-deterministic compared to a threshold check, for no benefit.
+
+- `AnomalyReadingRepository` (`JdbcTemplate`) joins `latest_reading` +
+  `districts` with a `LEFT JOIN` aggregate over `electricity_data`
+  (`AVG`/`STDDEV_POP` per meter within a configurable history window). The
+  `LEFT JOIN` means meters with too little history still appear, with null
+  avg/stddev, rather than being silently dropped.
+- `AnomalyDetector` is a pure, Spring-free class evaluating two independent
+  rules per meter snapshot:
+  - Voltage outside `nominal ± tolerance%` (EN 50160-style band, default
+    230V ±10%) → `UNDER_VOLTAGE` / `OVER_VOLTAGE`.
+  - Power draw more than `powerZscoreThreshold` standard deviations from its
+    own recent historical average → `POWER_SPIKE` / `POWER_DROP`. Skipped
+    entirely when there isn't enough history yet (null avg/stddev) or the
+    stddev is exactly zero, rather than guessing.
+- `AnomalyScanner` runs both checks on a schedule (`grid.analyzer.scan-interval`,
+  default 30s). If any anomalies are found, they're batched into **one**
+  Spring AI `ChatClient` call (not one call per anomaly) against a local
+  Ollama model, asked to write a short plain-English incident summary from
+  only the given facts. The result is held in memory (`LatestAnomalyReport`,
+  latest scan only) and served at `GET /anomalies`.
+- LLM provider: local Ollama (`spring-ai-starter-model-ollama`), not a hosted
+  API — no key required, runs on your machine. Chosen deliberately over
+  running Ollama in docker-compose: Docker Desktop on macOS doesn't pass
+  Apple Silicon GPU acceleration through to containers, so a containerized
+  Ollama would be substantially slower for no benefit.
 
 ## Parking lot (deferred, not yet decided)
 
@@ -172,3 +208,11 @@ thread pool draining one queue would NOT have this guarantee.
 - Connection pool sizing relative to worker pool size — now more relevant
   since consumer workers run on virtual threads and `workerCount` is no
   longer bounded by platform-thread cost.
+- Persisting anomaly history. `analyzer` currently only holds the latest
+  scan's result in memory (`LatestAnomalyReport`) — a restart loses it, and
+  there's no history/trend view. Deferred until there's a real need (e.g. a
+  frontend wanting more than "what's happening right now").
+- Whether anomaly detection should also aggregate at the district level
+  (e.g. "district 7 as a whole looks unusual") alongside the current
+  per-meter checks. Not added speculatively; revisit if per-meter detection
+  proves too noisy or misses district-wide patterns.
